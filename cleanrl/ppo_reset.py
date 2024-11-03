@@ -13,6 +13,10 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 
+import h5py
+import numpy as np
+
+
 
 @dataclass
 class Args:
@@ -83,6 +87,21 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+
+# Added by Mansi
+# HDF5 setup: Create the file and structure
+hdf5_file = h5py.File(f"runs/{run_name}.hdf5", "w")
+
+# Create groups for hyperparameters and data
+hyperparams_group = hdf5_file.create_group("hyperparameters")
+data_group = hdf5_file.create_group("data")
+
+# Save hyperparameters as attributes of the hyperparams group
+for key, value in vars(args).items():
+    if value is not None:  # HDF5 does not support None, so we need to replace it with a string
+        hyperparams_group.attrs[key] = value
+    else:
+        hyperparams_group.attrs[key] = str(None)
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma):
@@ -198,6 +217,16 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
+    # HDF5 - added by Mansi
+    # Create data types for episodic and training statistics
+    episodic_statistics_type = np.dtype([('step', 'i4'), ('episodic_return', 'f4'), ('episodic_length', 'f4')])
+    training_statistics_type = np.dtype([('step', 'i4'), ('td_loss', 'f4'), ('q_values', 'f4')])
+
+    # Create datasets for episodic and training statistics
+    data_group.create_dataset("episodic_statistics", (args.total_timesteps // 50,), dtype=episodic_statistics_type)
+    data_group.create_dataset("training_statistics", (args.total_timesteps // 100,), dtype=training_statistics_type)
+
+
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -229,11 +258,19 @@ if __name__ == "__main__":
                         print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                        ### HDF%
+                        data_group["episodic_statistics"][episode_index] = np.array([(np.int64(global_step), np.float64(info["episode"]["r"]), np.float64(info["episode"]["l"]))], dtype=episodic_statistics_type)
                       
             #### Added by Mansi
             if global_step % args.steps_to_reset == 0:
                 agent = Agent(envs).to(device)
                 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+            
+            #HDF5
+            # Log training statistics every 100 steps 
+            if global_step % 100 == 0:
+                data_group["training_statistics"][global_step // 100] = np.array([(np.int64(global_step), loss.item(), values.mean().item())], dtype=training_statistics_type)
+
 
 
         # bootstrap value if not done
@@ -358,5 +395,8 @@ if __name__ == "__main__":
 
     envs.close()
     writer.close()
+    # After all the training is done
+    hdf5_file.close()
+
 
 
