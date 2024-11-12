@@ -41,7 +41,6 @@ class Args:
 
     # Algorithm specific arguments
     num_agents: int = 5
-    steps_to_reset: int = 200000
     env_id: str = "Hopper-v4"
     """the id of the environment"""
     total_timesteps: int = 1000000
@@ -146,21 +145,20 @@ class Agent(nn.Module):
 
 def get_ensemble_action_and_value(agents, obs, action=None):
     actions, logprobs, entropies, values = [], [], [], []
-    weights = [0.05, 0.15, 0.25, 0.25, 0.30]
     for agent in agents:
         a, logprob, entropy, value = agent.get_action_and_value(obs, action)
-        actions.append(a * weights[i])
-        logprobs.append(logprob * weights[i])
-        entropies.append(entropy * weights[i])
-        values.append(value * weights[i])
+        actions.append(a)
+        logprobs.append(logprob)
+        entropies.append(entropy)
+        values.append(value)
 
-    # Sum the weighted results across all agents
-    action_weighted = torch.sum(torch.stack(actions), dim=0)
-    logprob_weighted = torch.sum(torch.stack(logprobs), dim=0)
-    entropy_weighted = torch.sum(torch.stack(entropies), dim=0)
-    value_weighted = torch.sum(torch.stack(values), dim=0)
+    # Average the results across all agents in the ensemble
+    action_mean = torch.mean(torch.stack(actions), dim=0)
+    logprob_mean = torch.mean(torch.stack(logprobs), dim=0)
+    entropy_mean = torch.mean(torch.stack(entropies), dim=0)
+    value_mean = torch.mean(torch.stack(values), dim=0)
 
-    return action_weighted, logprob_weighted, entropy_weighted, value_weighted
+    return action_mean, logprob_mean, entropy_mean, value_mean
 
 
 if __name__ == "__main__":
@@ -258,18 +256,6 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
-            if global_step % args.steps_to_reset == 0 and global_step > 0:
-                # Remove the oldest agent and its optimizer
-                removed_agent = agents.pop(0)  # Remove the first agent
-                removed_optimizer = optimizers.pop(0)  # Remove the corresponding optimizer
-
-                # Create a new agent and its optimizer, then add them to the lists
-                new_agent = Agent(envs).to(device)
-                new_optimizer = optim.Adam(new_agent.parameters(), lr=args.learning_rate, eps=1e-5)
-                agents.append(new_agent)
-                optimizers.append(new_optimizer)
-
-
         # bootstrap value if not done
         with torch.no_grad():
             # next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -306,55 +292,51 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
-                logratio = newlogprob - b_logprobs[mb_inds]
-                ratio = logratio.exp()
-
-                with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
-                    old_approx_kl = (-logratio).mean()
-                    approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
-
-                mb_advantages = b_advantages[mb_inds]
-                if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-
-                # Policy loss
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-                # Value loss
-                newvalue = newvalue.view(-1)
-                if args.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
-                        -args.clip_coef,
-                        args.clip_coef,
-                    )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-                else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
-
-                entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-
-                # optimizer.zero_grad()
-                # loss.backward()
-                # nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
-                # optimizer.step()
-                # Iterate over each agent and its optimizer for the update
                 for i, agent in enumerate(agents):
                     optimizer = optimizers[i]
-                    optimizer.zero_grad()  # Clear gradients for the agent
-                    loss.backward()  # Backpropagate loss for this agent
-                    nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)  # Gradient clipping
-                    optimizer.step()  # Update agent's parameters
+                    optimizer.zero_grad()
 
+                    _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                    logratio = newlogprob - b_logprobs[mb_inds]
+                    ratio = logratio.exp()
+
+                    with torch.no_grad():
+                        # calculate approx_kl http://joschu.net/blog/kl-approx.html
+                        old_approx_kl = (-logratio).mean()
+                        approx_kl = ((ratio - 1) - logratio).mean()
+                        clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
+
+                    mb_advantages = b_advantages[mb_inds]
+                    if args.norm_adv:
+                        mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+
+                    # Policy loss
+                    pg_loss1 = -mb_advantages * ratio
+                    pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+                    # Value loss
+                    newvalue = newvalue.view(-1)
+                    if args.clip_vloss:
+                        v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+                        v_clipped = b_values[mb_inds] + torch.clamp(
+                            newvalue - b_values[mb_inds],
+                            -args.clip_coef,
+                            args.clip_coef,
+                        )
+                        v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                        v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                        v_loss = 0.5 * v_loss_max.mean()
+                    else:
+                        v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+
+                    entropy_loss = entropy.mean()
+                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+
+                    optimizer.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                    optimizer.step()
 
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break

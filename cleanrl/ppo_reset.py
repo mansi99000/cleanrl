@@ -88,20 +88,7 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
-# Added by Mansi
-# HDF5 setup: Create the file and structure
-hdf5_file = h5py.File(f"runs/{run_name}.hdf5", "w")
 
-# Create groups for hyperparameters and data
-hyperparams_group = hdf5_file.create_group("hyperparameters")
-data_group = hdf5_file.create_group("data")
-
-# Save hyperparameters as attributes of the hyperparams group
-for key, value in vars(args).items():
-    if value is not None:  # HDF5 does not support None, so we need to replace it with a string
-        hyperparams_group.attrs[key] = value
-    else:
-        hyperparams_group.attrs[key] = str(None)
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma):
@@ -161,6 +148,16 @@ class Agent(nn.Module):
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
 
+# Create a group for the experiment
+# Function to determine the next experiment number
+def get_next_experiment_number(hdf5_file):
+    """Returns the next experiment number based on the existing groups."""
+    existing_experiments = [int(name.split('_')[1]) for name in hdf5_file.keys() if name.startswith("experiment_")]
+    if not existing_experiments:
+        return 1  # If no experiments exist, start with 1
+    else:
+        return max(existing_experiments) + 1  # Increment from the last experiment
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -184,6 +181,33 @@ if __name__ == "__main__":
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
+
+    # #H5
+    # hdf5_path = 'ppo_experiments.h5'        
+    # with h5py.File(hdf5_path, 'a') as hdf5_file:  # 'a' mode allows appending
+    #     experiment_number = get_next_experiment_number(hdf5_file)
+    #     experiment_group_name = f"experiment_{experiment_number}"
+    #     experiment_group = hdf5_file.create_group(experiment_group_name)
+    #     # groups
+    #     hyperparams_group = experiment_group.create_group("hyperparameters")
+    #     data_group = experiment_group.create_group("data")
+    #     # model_group = experiment_group.create_group("model_weights")
+
+    #     # datasets
+    #     episodic_statistics_type = np.dtype([('step', 'i4'), ('episodic_return', 'f4'), ('episodic_length', 'f4')])
+    #     data_group.create_dataset("episodic_statistics", (args.total_timesteps,), dtype = episodic_statistics_type) # there is an implicit assumption in this declaration that there the average number of timesteps in an episode is greater than 50.
+        
+    #     training_statistics_type = np.dtype([('step', 'i4'), ('td_loss', 'f4'), ('policy_loss', 'f4'), ('kl_divergence', 'f4')])
+    #     data_group.create_dataset("training_statistics", (args.total_timesteps,), maxshape=(None,), dtype=training_statistics_type)
+
+    #     # load hyperparams in the hyperparams_group
+    #     for key, value in vars(args).items():
+    #         if value is not None:
+    #             hyperparams_group.attrs[key] = value
+    #             print(hyperparams_group.attrs[key], ": ", value)
+    #         else:
+    #             hyperparams_group.attrs[key] = str(None)
+
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -216,15 +240,6 @@ if __name__ == "__main__":
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
-
-    # HDF5 - added by Mansi
-    # Create data types for episodic and training statistics
-    episodic_statistics_type = np.dtype([('step', 'i4'), ('episodic_return', 'f4'), ('episodic_length', 'f4')])
-    training_statistics_type = np.dtype([('step', 'i4'), ('td_loss', 'f4'), ('q_values', 'f4')])
-
-    # Create datasets for episodic and training statistics
-    data_group.create_dataset("episodic_statistics", (args.total_timesteps // 50,), dtype=episodic_statistics_type)
-    data_group.create_dataset("training_statistics", (args.total_timesteps // 100,), dtype=training_statistics_type)
 
 
     for iteration in range(1, args.num_iterations + 1):
@@ -259,19 +274,12 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
                         ### HDF%
-                        data_group["episodic_statistics"][episode_index] = np.array([(np.int64(global_step), np.float64(info["episode"]["r"]), np.float64(info["episode"]["l"]))], dtype=episodic_statistics_type)
+                        #data_group["episodic_statistics"][episode_index] = np.array([(np.int64(global_step), np.float64(info["episode"]["r"]), np.float64(info["episode"]["l"]))], dtype=episodic_statistics_type)
                       
             #### Added by Mansi
             if global_step % args.steps_to_reset == 0:
                 agent = Agent(envs).to(device)
                 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-            
-            #HDF5
-            # Log training statistics every 100 steps 
-            if global_step % 100 == 0:
-                data_group["training_statistics"][global_step // 100] = np.array([(np.int64(global_step), loss.item(), values.mean().item())], dtype=training_statistics_type)
-
-
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -396,7 +404,7 @@ if __name__ == "__main__":
     envs.close()
     writer.close()
     # After all the training is done
-    hdf5_file.close()
+    #hdf5_file.close()
 
 
 
